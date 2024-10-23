@@ -18,7 +18,7 @@ def extract_data_from_json(json_file):
                 naimenovanie = item.get('Наименование', '')
                 role = item.get('Роль', '')
                 for vm in item.get('ВМ', []):
-                    vm_name = vm.get('Доменное имя') or vm.get('Имя сервера', '')
+                    vm_name = vm.get('Имя сервера', '')
                     ip_address = vm.get('IP адрес', '')
                     sizing = vm.get('Сайзинг', '')
 
@@ -33,9 +33,6 @@ def extract_data_from_json(json_file):
 
         # Создаем DataFrame из списка ВМ
         df_json = pd.DataFrame(vm_list)
-
-        logging.info(f"Извлечено {len(df_json)} записей из JSON файла")
-
         return df_json
 
     except Exception as e:

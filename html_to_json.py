@@ -1,183 +1,189 @@
 import json
 import re
-from bs4 import BeautifulSoup
 import logging
+from typing import Any, Dict, List, Optional
+from bs4 import BeautifulSoup
 
 
-def parse_html_to_json(html_file, json_file):
+def parse_html_to_json(html_file: str, json_file: str) -> None:
+    """
+    Парсит HTML-файл и сохраняет данные в формате JSON.
+
+    :param html_file: Путь к HTML-файлу.
+    :param json_file: Путь к выходному JSON-файлу.
+    :raises FileNotFoundError: Если HTML-файл не найден.
+    :raises Exception: Для остальных ошибок при парсинге.
+    """
     try:
-        # Настраиваем логирование
+        # Настройка логирования
         logging.basicConfig(level=logging.DEBUG, format='%(message)s')
 
-        # Читаем HTML-код из файла
-        with open(html_file, 'r', encoding='utf-8') as file:
-            html_content = file.read()
+        # Чтение HTML-кода из файла
+        html_content = load_html(html_file)
 
-        # Парсим HTML-код
+        # Парсинг HTML-кода
         soup = BeautifulSoup(html_content, 'html.parser')
 
-        # Ищем все <div class='innerCell'>
+        # Поиск всех <div class='innerCell'>
         inner_cells = soup.find_all('div', class_='innerCell')
 
         # Результирующий список
-        result = []
+        result: List[Dict[str, Any]] = []
 
         for cell in inner_cells:
-            # Находим заголовок h3 внутри текущей ячейки
-            h3 = cell.find('h3')
-            if h3:
-                section_title = h3.get_text(strip=True)
-                logging.info(f"Обработка раздела: {section_title}")
+            # Извлечение заголовка раздела
+            section_title = get_section_title(cell)
+            if not section_title:
+                logging.warning("Заголовок секции не найден. Пропуск секции.")
+                continue
 
-                data = []  # Инициализируем data перед проверкой наличия таблицы
+            logging.info(f"Обработка раздела: {section_title}")
+            data: List[Dict[str, Any]] = []
 
-                # Ищем таблицу внутри этой ячейки
-                table = cell.find('table')
-                if table:
-                    # Преобразуем таблицу в матрицу данных
-                    table_data = parse_html_table(table)
+            # Поиск таблицы внутри текущей ячейки
+            table = cell.find('table')
+            if table:
+                # Парсинг таблицы в матрицу данных
+                table_data = parse_html_table(table)
 
-                    # Извлекаем заголовки столбцов и нормализуем их
-                    headers = table_data[0]
-                    normalized_headers = [normalize_header(header) for header in headers]
-                    logging.debug(f"Исходные заголовки: {headers}")
-                    logging.debug(f"Нормализованные заголовки: {normalized_headers}")
-                    header_indices = {header: idx for idx, header in enumerate(normalized_headers)}
+                if not table_data:
+                    logging.warning(f"Таблица в разделе '{section_title}' пуста.")
+                    continue
 
-                    current_naimenovanie = ''
-                    current_role = ''
+                # Извлечение и нормализация заголовков столбцов
+                headers = table_data[0]
+                normalized_headers = [normalize_header(header) for header in headers]
+                logging.debug(f"Исходные заголовки: {headers}")
+                logging.debug(f"Нормализованные заголовки: {normalized_headers}")
+                header_indices = {header: idx for idx, header in enumerate(normalized_headers)}
 
-                    for row in table_data[1:]:
-                        # Обновляем 'Наименование' и 'Роль', если они присутствуют в строке
-                        if 'наименование' in header_indices:
-                            idx = header_indices['наименование']
-                            if row[idx]:
-                                current_naimenovanie = row[idx]
-                        if 'роль' in header_indices:
-                            idx = header_indices['роль']
-                            if row[idx]:
-                                current_role = row[idx]
+                current_naimenovanie: str = ''
+                current_role: str = ''
 
-                        # Собираем данные ВМ
-                        vm_entry = {}
+                for row in table_data[1:]:
+                    # Обновление 'Наименование' и 'Роль', если они присутствуют в строке
+                    current_naimenovanie = update_field('наименование', header_indices, row, current_naimenovanie)
+                    current_role = update_field('роль', header_indices, row, current_role)
 
-                        # Унифицируем ключ 'Имя сервера'
-                        if 'доменноеимя' in header_indices:
-                            idx = header_indices['доменноеимя']
-                            vm_entry['Имя сервера'] = row[idx]
-                        elif 'имясервера' in header_indices:
-                            idx = header_indices['имясервера']
-                            vm_entry['Имя сервера'] = row[idx]
+                    # Извлечение данных ВМ
+                    vm_entry = extract_vm_entry(header_indices, row)
 
-                        # Обрабатываем 'IP адрес'
-                        ip_headers = ['ipадрес', 'ipaddress', 'ip', 'ip_адрес']
-                        for ip_header in ip_headers:
-                            if ip_header in header_indices:
-                                idx = header_indices[ip_header]
-                                vm_entry['IP адрес'] = row[idx]
-                                break  # Прекращаем поиск после первого совпадения
+                    # Проверка наличия 'Имя сервера' и добавление в данные
+                    if 'Имя сервера' in vm_entry and vm_entry['Имя сервера']:
+                        existing_entry = find_existing_entry(data, current_naimenovanie, current_role)
+                        if existing_entry:
+                            existing_entry['ВМ'].append(vm_entry)
+                        else:
+                            data.append({
+                                'Наименование': current_naimenovanie,
+                                'Роль': current_role,
+                                'ВМ': [vm_entry]
+                            })
+            else:
+                logging.warning(f"Таблица не найдена в разделе: {section_title}")
 
-                        # Обрабатываем 'Сайзинг'
-                        sizing_headers = ['сайзинг', 'sizing']
-                        for sizing_header in sizing_headers:
-                            if sizing_header in header_indices:
-                                idx = header_indices[sizing_header]
-                                vm_entry['Сайзинг'] = row[idx]
-                                break
+            # Добавление раздела в результирующий список
+            result.append({
+                'Раздел': section_title,
+                'Данные': data
+            })
 
-                        # Проверяем, что vm_entry содержит 'Имя сервера'
-                        if 'Имя сервера' in vm_entry and vm_entry['Имя сервера']:
-                            # Проверяем, есть ли уже запись с текущими 'Наименование' и 'Роль'
-                            existing_entry = next(
-                                (item for item in data if
-                                 item['Наименование'] == current_naimenovanie and item['Роль'] == current_role),
-                                None
-                            )
-                            if existing_entry:
-                                existing_entry['ВМ'].append(vm_entry)
-                            else:
-                                data.append({
-                                    'Наименование': current_naimenovanie,
-                                    'Роль': current_role,
-                                    'ВМ': [vm_entry]
-                                })
-                else:
-                    logging.warning(f"Таблица не найдена в разделе: {section_title}")
-
-                # Добавляем в результирующий список
-                result.append({
-                    'Раздел': section_title,
-                    'Данные': data
-                })
-
-        # Преобразуем результат в JSON
-        json_result = json.dumps(result, ensure_ascii=False, indent=4)
-
-        # Сохраняем JSON в файл
-        with open(json_file, 'w', encoding='utf-8') as f:
-            f.write(json_result)
-
+        # Сохранение результата в JSON-файл
+        save_json(result, json_file)
         logging.info(f"Данные успешно сохранены в файле {json_file}")
 
+    except FileNotFoundError as fnfe:
+        logging.error(f"HTML-файл не найден: {fnfe}")
+        raise
     except Exception as e:
-        logging.error(f"Ошибка при парсинге HTML файла: {e}")
-        raise e  # Пробрасываем исключение вверх
+        logging.exception(f"Ошибка при парсинге HTML файла: {e}")
+        raise
 
 
-def parse_html_table(table):
+def load_html(file_path: str) -> str:
+    """
+    Загружает HTML-контент из файла.
+
+    :param file_path: Путь к HTML-файлу.
+    :return: Содержимое HTML-файла.
+    :raises FileNotFoundError: Если файл не найден.
+    :raises Exception: Для остальных ошибок при чтении файла.
+    """
+    try:
+        logging.info(f"Чтение HTML-файла: {file_path}")
+        with open(file_path, 'r', encoding='utf-8') as file:
+            return file.read()
+    except FileNotFoundError as fnfe:
+        logging.error(f"HTML-файл не найден: {file_path}")
+        raise
+    except Exception as e:
+        logging.error(f"Не удалось прочитать HTML-файл {file_path}: {e}")
+        raise
+
+
+def get_section_title(cell: Any) -> Optional[str]:
+    """
+    Извлекает заголовок раздела из ячейки.
+
+    :param cell: BeautifulSoup объект ячейки.
+    :return: Заголовок раздела или None, если не найден.
+    """
+    h3 = cell.find('h3')
+    if h3:
+        return h3.get_text(strip=True)
+    return None
+
+
+def parse_html_table(table: Any) -> List[List[str]]:
     """
     Парсит HTML-таблицу в список строк, корректно обрабатывая rowspan и colspan.
     Возвращает список строк, где каждая строка - это список значений ячеек.
+
+    :param table: BeautifulSoup объект таблицы.
+    :return: Список строк, каждая строка - список значений ячеек.
     """
     rows = table.find_all('tr')
-    table_data = []
-    rowspan_dict = {}  # Словарь для отслеживания ячеек с rowspan
+    table_data: List[List[str]] = []
+    rowspan_dict: Dict[int, Dict[str, Any]] = {}  # Словарь для отслеживания ячеек с rowspan
+
+    # Определение максимального количества колонок для заполнения пустыми ячейками
+    num_columns = max(len(row.find_all(['td', 'th'])) for row in rows) if rows else 0
 
     for row in rows:
-        row_cells = []
+        row_cells: List[str] = []
         cells = row.find_all(['td', 'th'])
-        col_index = 0  # Индекс текущей колонки в строке
-
-        # Индекс ячейки в визуальном представлении строки
         cell_idx = 0
 
-        while cell_idx < len(cells):
-            cell = cells[cell_idx]
-            # Проверяем, есть ли незавершенные rowspan с предыдущих строк
-            while len(row_cells) in rowspan_dict:
-                rowspan_cell = rowspan_dict[len(row_cells)]
-                row_cells.append(rowspan_cell['value'])
-                rowspan_cell['remaining'] -= 1
-                if rowspan_cell['remaining'] == 0:
+        while cell_idx < len(cells) or len(row_cells) < num_columns:
+            # Проверка наличия незавершенных rowspan
+            if len(row_cells) in rowspan_dict:
+                cell_info = rowspan_dict[len(row_cells)]
+                row_cells.append(cell_info['value'])
+                cell_info['remaining'] -= 1
+                if cell_info['remaining'] == 0:
                     del rowspan_dict[len(row_cells) - 1]
+                continue
 
-            # Получаем текст ячейки
+            if cell_idx >= len(cells):
+                # Если ячеек больше нет, заполняем пустыми значениями
+                row_cells.append('')
+                continue
+
+            cell = cells[cell_idx]
             cell_text = cell.get_text(strip=True)
             colspan = int(cell.get('colspan', 1))
             rowspan = int(cell.get('rowspan', 1))
 
-            # Добавляем значение ячейки в текущую строку, учитывая colspan
+            # Добавление значения ячейки, учитывая colspan
             for _ in range(colspan):
                 row_cells.append(cell_text)
 
-            # Если rowspan > 1, сохраняем ячейку для заполнения в следующих строках
+            # Обработка rowspan
             if rowspan > 1:
                 for i in range(colspan):
                     rowspan_dict[len(row_cells) - colspan + i] = {'value': cell_text, 'remaining': rowspan - 1}
 
             cell_idx += 1
-
-        # Заполняем оставшиеся ячейки строки из rowspan_dict или пустыми значениями
-        num_columns = max(len(row.find_all(['td', 'th'])) for row in rows)
-        while len(row_cells) < num_columns:
-            if len(row_cells) in rowspan_dict:
-                rowspan_cell = rowspan_dict[len(row_cells)]
-                row_cells.append(rowspan_cell['value'])
-                rowspan_cell['remaining'] -= 1
-                if rowspan_cell['remaining'] == 0:
-                    del rowspan_dict[len(row_cells) - 1]
-            else:
-                row_cells.append('')  # Пустая ячейка
 
         logging.debug(f"Обработанная строка: {row_cells}")
         table_data.append(row_cells)
@@ -185,10 +191,109 @@ def parse_html_table(table):
     return table_data
 
 
-def normalize_header(header):
+def normalize_header(header: str) -> str:
     """
     Нормализует заголовок столбца: приводит к нижнему регистру, удаляет все пробельные символы и дефисы.
+
+    :param header: Исходный заголовок.
+    :return: Нормализованный заголовок.
     """
     header = header.strip().lower().replace('-', '')
     header = re.sub(r'\s+', '', header)  # Удаляем все виды пробельных символов
     return header
+
+
+def update_field(field_name: str, header_indices: Dict[str, int], row: List[str], current_value: str) -> str:
+    """
+    Обновляет значение поля ('Наименование' или 'Роль') на основе текущей строки таблицы.
+
+    :param field_name: Имя поля для обновления.
+    :param header_indices: Словарь индексов заголовков.
+    :param row: Текущая строка таблицы.
+    :param current_value: Текущее значение поля.
+    :return: Обновленное значение поля.
+    """
+    if field_name in header_indices:
+        idx = header_indices[field_name]
+        if idx < len(row) and row[idx]:
+            logging.debug(f"Обновление '{field_name}': {row[idx]}")
+            return row[idx]
+    return current_value
+
+
+def extract_vm_entry(header_indices: Dict[str, int], row: List[str]) -> Dict[str, str]:
+    """
+    Извлекает информацию о ВМ из строки таблицы.
+
+    :param header_indices: Словарь индексов заголовков.
+    :param row: Текущая строка таблицы.
+    :return: Словарь с информацией о ВМ.
+    """
+    vm_entry: Dict[str, str] = {}
+
+    # Унификация ключа 'Имя сервера'
+    if 'доменноеимя' in header_indices:
+        idx = header_indices['доменноеимя']
+        if idx < len(row):
+            vm_entry['Имя сервера'] = row[idx]
+    elif 'имясервера' in header_indices:
+        idx = header_indices['имясервера']
+        if idx < len(row):
+            vm_entry['Имя сервера'] = row[idx]
+
+    # Обработка 'IP адрес'
+    ip_headers = ['ipадрес', 'ipaddress', 'ip', 'ip_адрес']
+    for ip_header in ip_headers:
+        if ip_header in header_indices:
+            idx = header_indices[ip_header]
+            if idx < len(row):
+                vm_entry['IP адрес'] = row[idx]
+                break
+    else:
+        vm_entry['IP адрес'] = ''
+
+    # Обработка 'Сайзинг'
+    sizing_headers = ['сайзинг', 'sizing']
+    for sizing_header in sizing_headers:
+        if sizing_header in header_indices:
+            idx = header_indices[sizing_header]
+            if idx < len(row):
+                vm_entry['Сайзинг'] = row[idx]
+                break
+    else:
+        vm_entry['Сайзинг'] = ''
+
+    logging.debug(f"Извлеченная ВМ: {vm_entry}")
+    return vm_entry
+
+
+def find_existing_entry(data: List[Dict[str, Any]], naimenovanie: str, role: str) -> Optional[Dict[str, Any]]:
+    """
+    Ищет существующую запись с заданным 'Наименование' и 'Роль'.
+
+    :param data: Список данных.
+    :param naimenovanie: Текущее 'Наименование'.
+    :param role: Текущая 'Роль'.
+    :return: Ссылка на существующую запись или None.
+    """
+    return next(
+        (item for item in data if item['Наименование'] == naimenovanie and item['Роль'] == role),
+        None
+    )
+
+
+def save_json(data: List[Dict[str, Any]], json_file: str) -> None:
+    """
+    Сохраняет данные в формате JSON в файл.
+
+    :param data: Данные для сохранения.
+    :param json_file: Путь к выходному JSON-файлу.
+    :raises Exception: Если не удалось сохранить файл.
+    """
+    try:
+        with open(json_file, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+        logging.info(f"Данные успешно сохранены в файле {json_file}")
+    except Exception as e:
+        logging.error(f"Не удалось сохранить JSON файл {json_file}: {e}")
+        raise
